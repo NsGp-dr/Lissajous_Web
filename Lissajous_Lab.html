@@ -1,0 +1,1500 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lissajous Lab · Fase 1</title>
+
+<!--
+╔══════════════════════════════════════════════════════════════════════════╗
+║  LISSAJOUS LAB · FASE 1 (opción E: web)                                  ║
+║  Análisis de géneros musicales mediante curvas de Lissajous              ║
+║  parametrizadas por entonación justa y por la razón áurea φ.             ║
+╚══════════════════════════════════════════════════════════════════════════╝
+
+CÓMO USARLO
+  1. Abre este archivo en Chrome o Firefox (doble clic, sin servidor).
+  2. Al primer clic en la página arranca el tono de prueba 440 Hz + 660 Hz
+     (ratio 3:2, quinta justa). Antes del clic se muestra una simulación
+     virtual de ese mismo tono, para que la curva se vea de inmediato.
+  3. Fuentes: "Tono de prueba", "Micrófono" o "Cargar archivo" (+ play/pause).
+  4. Ajusta los sliders del panel derecho. Toggle φ-lock fuerza el ratio áureo.
+  5. Tecla P = modo proyección (pantalla completa, solo la curva). Esc sale.
+     Tecla C = limpiar el trazo.  Tecla S = reiniciar la partitura (Score).
+  6. Partitura (panel, sección "Partitura · ventana × hop"): cada `hop`
+     segundos, si hay un intervalo válido (|error| < 50 cents), se guarda
+     una celda = mini-Lissajous de esa ventana, coloreada por el hue de su
+     intervalo; el halo es más ancho cuanto mayor su dimensión fractal D.
+     Se llena de izquierda a derecha y de arriba abajo, `Cols` columnas.
+       · Hop: separación entre celdas (fija el ritmo de llenado).
+       · Ventana τ: duración nominal de cada ventana (metadato exportado).
+       · "Exportar partitura": JSON con meta, analysis y cells[].curve.
+     El campo `score` (parámetros + estadísticas) también viaja en
+     "Exportar JSON" y en cada mensaje del WebSocket.
+
+FLUJO DE SEÑAL
+  fuente -> AnalyserNode -> (FFT dB + señal temporal)
+         -> picos (interpolación parabólica) -> par dominante (f1, f2)
+         -> ratio f2/f1 plegado a una octava -> intervalo justo más cercano
+         -> (a, b, δ, φ, Ax, Ay) -> curva  x = Ax sin(a t + δ),  y = Ay sin(b t + φ)
+         -> canvas offscreen 256x256 -> box-counting -> dimensión D
+         -> c complejo -> Julia / Mandelbrot de 128x128 (semilla de la Fase 2)
+
+CÓMO INTEGRARLO CON TOUCHDESIGNER
+  A) Captura de imagen (la curva):
+     - Modo proyección (tecla P) + ventana del navegador:
+         * Windows: Window Capture / Video Device In, o OBS (captura de
+           ventana) -> plugin NDI/Spout -> NDI In TOP en TouchDesigner.
+         * macOS: OBS -> NDI (o Syphon con un plugin de OBS) -> NDI In TOP
+           / Syphon Spout In TOP.
+     - Alternativa sin captura: un Web Render TOP (Chromium embebido) puede
+       cargar este mismo archivo (file:///...). Útil con tono de prueba o
+       archivo; el micrófono depende de los permisos del Web Render TOP.
+  B) Parámetros (números en tiempo real) por WebSocket:
+     - En TouchDesigner crea un Web Server DAT (Active = On, Port = 9980).
+     - En su callbacks DAT, en onWebSocketReceiveText(dat, client, data),
+       haz  p = json.loads(data)  y escribe p['lissajous']['a'], p['fractal']['D'],
+       etc. en un Constant CHOP o Table DAT.
+     - En el panel de este HTML escribe ws://localhost:9980 y pulsa
+       "Conectar". Se envía un JSON por fotograma (el stub está en la
+       sección 9: WS.send).
+  C) Datos "congelados": botón "Exportar JSON" (incluye 512 puntos de la
+     curva en [-1,1]) -> Table DAT / Script DAT. "Exportar PNG" -> Movie
+     File In TOP.
+
+CÓMO EXTENDERLO A LA FASE 2
+  - Torsión / nudos tóricos 3D: sustituir lissajousPoint() por
+        x = (R + r cos(q·u)) cos(p·u)
+        y = (R + r cos(q·u)) sin(p·u)
+        z = r sin(q·u) + τ·u          (τ = torsión)
+    con (p, q) = (a, b) del intervalo detectado y τ ligado a δ.
+    Para la dimensión fractal 3D, generalizar boxCountDimension() a vóxeles.
+  - Mandelbrot completo: reemplazar renderPreview() por un fragment shader
+    (WebGL) o un Worker con zoom y más iteraciones; ver el stub
+    renderMandelbrotFullStub() en la sección 6. En TouchDesigner el
+    Mandelbrot completo es trivial con un GLSL TOP, alimentado por
+    p['fractal']['c'].
+
+RELACIÓN CON "HARMONIC WEB" (github.com/NsGp-dr)
+  - La tabla RAW_INTERVALS (sección 2) está aislada para que puedas
+    sustituirla o ampliarla con las series armónicas / ratios de tu
+    repositorio sin tocar el resto del código.
+  - El JSON exportado usa números y nombres simples (n, d, cents) para
+    cruzarse con tus tablas de entonación justa.
+  - Fibonacci: φ ≈ 8:5, 13:8, 21:13, 34:21 ... el modo φ-lock usa el valor
+    irracional exacto, por lo que la curva nunca se cierra.
+  - Estética y arquitectura (archivo único, sin dependencias, terminal
+    oscuro neón) compatibles con el resto del ecosistema.
+-->
+
+<style>
+:root{
+  --bg:#000; --panel:#040907; --fg:#a9f5d2; --dim:#4f7f6c; --neon:#39ff9c;
+  --gold:#ffd23f; --line:#10382d; --err:#ff5d6c;
+}
+*{box-sizing:border-box}
+html{font-size:clamp(12px, 0.5vw + 4px, 20px)}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);
+  font-family:ui-monospace,"JetBrains Mono","Fira Code",Menlo,Consolas,monospace}
+#app{display:grid;grid-template-columns:minmax(0,1fr) 27rem;height:100vh}
+#stage{position:relative;background:#000;overflow:hidden;min-height:0}
+#stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#panel{background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;
+  padding:.8rem .9rem 2rem}
+h1{font-size:1rem;margin:0 0 .2rem;color:var(--neon);letter-spacing:.12em}
+.sub{color:var(--dim);font-size:.72rem;margin-bottom:.8rem}
+.sec{border-top:1px solid var(--line);padding:.7rem 0}
+.sec h2{margin:0 0 .5rem;font-size:.72rem;color:var(--dim);letter-spacing:.2em;text-transform:uppercase;font-weight:600}
+.row{display:flex;flex-wrap:wrap;gap:.4rem;margin-bottom:.4rem}
+.btn{background:#07130f;color:var(--fg);border:1px solid var(--line);padding:.4rem .6rem;
+  font:inherit;font-size:.78rem;cursor:pointer;border-radius:3px}
+.btn:hover{border-color:var(--neon);color:var(--neon)}
+.btn.on{border-color:var(--neon);color:#021;background:var(--neon)}
+.btn.gold{border-color:#6b5513;color:var(--gold)}
+input[type=number],input[type=text]{background:#020605;color:var(--fg);border:1px solid var(--line);
+  font:inherit;font-size:.78rem;padding:.3rem .4rem;border-radius:3px;min-width:0}
+input[type=number]{width:5.2rem}
+input[type=text]{flex:1}
+.sl{display:grid;grid-template-columns:8.5rem 1fr 5.4rem;gap:.5rem;align-items:center;margin:.28rem 0;font-size:.74rem}
+.sl output{text-align:right;color:var(--neon)}
+input[type=range]{width:100%;accent-color:var(--neon);margin:0}
+.tg{display:flex;align-items:center;gap:.5rem;font-size:.76rem;margin:.22rem 0;cursor:pointer;user-select:none}
+.tg input{accent-color:var(--neon)}
+.kv{display:flex;justify-content:space-between;gap:.6rem;font-size:.76rem;padding:.12rem 0;border-bottom:1px dotted #0c241d}
+.kv span{color:var(--dim)} .kv b{font-weight:500;text-align:right}
+#o_peaks,#o_pairs{font-size:.72rem;line-height:1.5;margin:.3rem 0}
+.big{font-size:1.15rem;font-weight:700;margin:.2rem 0 .4rem}
+#status{font-size:.74rem;min-height:1.2em;color:var(--dim);margin-top:.3rem}
+#status.err{color:var(--err)} #status.ok{color:var(--neon)}
+canvas.mini{width:100%;background:#010403;border:1px solid var(--line);display:block}
+#cvJulia{image-rendering:pixelated;max-width:16rem}
+#cvScore{display:block}
+#o_score{white-space:pre-line}
+select{background:#020605;color:var(--fg);border:1px solid var(--line);font:inherit;font-size:.76rem;padding:.25rem}
+.hint{position:absolute;left:50%;bottom:1.2rem;transform:translateX(-50%);color:var(--dim);
+  font-size:.8rem;opacity:0;transition:opacity .6s;pointer-events:none}
+body.projection .hint.show{opacity:.7}
+/* Modo proyección: solo la curva, fondo negro, sin paneles */
+body.projection #app{grid-template-columns:1fr}
+body.projection #panel,body.projection #ov{display:none}
+body.projection{cursor:none}
+@media (max-width:900px){
+  #app{grid-template-columns:1fr;grid-template-rows:60vh auto;height:auto;min-height:100vh}
+  #panel{border-left:0;border-top:1px solid var(--line)}
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="cvMain"></canvas>   <!-- trazo con persistencia (esto se captura) -->
+    <canvas id="ov"></canvas>       <!-- rejilla, ejes, curva fantasma, textos -->
+    <div class="hint" id="hint">Esc para salir del modo proyección</div>
+  </div>
+
+  <aside id="panel">
+    <h1>LISSAJOUS·LAB</h1>
+    <div class="sub">Fase 1 · entonación justa × razón áurea × box-counting</div>
+
+    <section class="sec">
+      <h2>Fuente de audio</h2>
+      <div class="row">
+        <button class="btn" id="btnTone">Tono de prueba</button>
+        <button class="btn" id="btnMic">Micrófono</button>
+        <button class="btn" id="btnFile">Cargar archivo</button>
+        <button class="btn" id="btnPlay" disabled>▶ Play</button>
+      </div>
+      <input type="file" id="fileIn" accept="audio/*,video/mp4,video/webm" hidden>
+      <div class="row" style="align-items:center;font-size:.74rem">
+        <span style="color:var(--dim)">Tono f1</span><input type="number" id="toneF1" value="440" min="20" max="8000" step="1">
+        <span style="color:var(--dim)">f2</span><input type="number" id="toneF2" value="660" min="20" max="8000" step="1">
+      </div>
+      <div id="status">Simulación virtual · haz clic para activar el audio</div>
+    </section>
+
+    <section class="sec">
+      <h2>Análisis</h2>
+      <div class="big" id="o_big">–</div>
+      <div class="kv"><span>FPS</span><b id="o_fps">–</b></div>
+      <div class="kv"><span>Fuente</span><b id="o_src">–</b></div>
+      <div class="kv"><span>RMS</span><b id="o_rms">–</b></div>
+      <div class="kv"><span>Tipo de intervalo</span><b id="o_kind">–</b></div>
+      <div class="kv"><span>Ratio detectado</span><b id="o_ratio">–</b></div>
+      <div class="kv"><span>Desviación</span><b id="o_cents">–</b></div>
+      <div class="kv"><span>¿Coincide con φ?</span><b id="o_phi">–</b></div>
+      <div class="kv"><span>a : b (curva)</span><b id="o_ab">–</b></div>
+      <div class="kv"><span>δ / φ fase</span><b id="o_ph">–</b></div>
+      <div class="kv"><span>Amplitud Ax / Ay</span><b id="o_amp">–</b></div>
+      <div class="kv"><span>Dimensión fractal D</span><b id="o_D" style="color:var(--gold)">–</b></div>
+      <div id="o_peaks"></div>
+      <div id="o_pairs"></div>
+    </section>
+
+    <section class="sec">
+      <h2>Controles</h2>
+      <div id="sliders"></div>
+      <div id="toggles" style="margin-top:.5rem"></div>
+      <div class="row" style="margin-top:.4rem">
+        <button class="btn" id="btnClear">Limpiar trazo</button>
+      </div>
+    </section>
+
+    <section class="sec">
+      <h2>Dimensión fractal · box-counting</h2>
+      <canvas class="mini" id="cvReg" width="360" height="170"></canvas>
+      <div style="font-size:.7rem;color:var(--dim);margin-top:.25rem" id="o_reg">–</div>
+    </section>
+
+    <section class="sec">
+      <h2>Fractal preview (semilla Fase 2)</h2>
+      <div class="row" style="align-items:center">
+        <select id="selPrev">
+          <option value="julia">Julia · c del ratio</option>
+          <option value="mandel">Mandelbrot · marcador c</option>
+        </select>
+        <label class="tg" style="margin:0"><input type="checkbox" id="chkLit"> c literal</label>
+      </div>
+      <canvas class="mini" id="cvJulia" width="128" height="128"></canvas>
+      <div style="font-size:.7rem;color:var(--dim);margin-top:.25rem" id="o_c">–</div>
+    </section>
+
+    <section class="sec">
+      <h2>Partitura · ventana × hop</h2>
+      <div class="row" style="align-items:center;font-size:.74rem">
+        <span style="color:var(--dim)">Ventana τ</span>
+        <input type="number" id="scTau" value="1.0" min="0.1" max="10" step="0.1" style="width:4rem">
+        <span style="color:var(--dim)">Hop</span>
+        <input type="number" id="scHop" value="0.25" min="0.05" max="5" step="0.05" style="width:4rem">
+        <span style="color:var(--dim)">Cols</span>
+        <input type="number" id="scCols" value="24" min="8" max="64" step="1" style="width:3.5rem">
+      </div>
+      <div class="row">
+        <button class="btn" id="btnScoreClear">Limpiar partitura</button>
+        <button class="btn gold" id="btnScoreJson">Exportar partitura</button>
+      </div>
+      <div style="max-height:22rem;overflow-y:auto;border:1px solid var(--line);background:#000;padding:.3rem">
+        <canvas id="cvScore"></canvas>
+      </div>
+      <div id="o_score" style="font-size:.72rem;color:var(--dim);margin-top:.4rem;line-height:1.55">–</div>
+    </section>
+
+    <section class="sec">
+      <h2>Exportación · TouchDesigner</h2>
+      <div class="row">
+        <button class="btn" id="btnJson">Exportar JSON</button>
+        <button class="btn" id="btnPng">Exportar PNG</button>
+        <button class="btn gold" id="btnProj">Modo proyección (P)</button>
+      </div>
+      <div class="row" style="align-items:center">
+        <input type="text" id="wsUrl" value="ws://localhost:9980" spellcheck="false">
+        <button class="btn" id="btnWs">Conectar</button>
+      </div>
+      <div style="font-size:.72rem;color:var(--dim)" id="o_ws">WebSocket: desconectado</div>
+    </section>
+  </aside>
+</div>
+
+<script>
+'use strict';
+/* ============================================================================
+   LISSAJOUS LAB · Fase 1
+   Secciones:
+     0. Utilidades y estado
+     1. (pura) Tabla de entonación justa y emparejamiento por cents
+     2. (pura) Análisis espectral: picos, interpolación parabólica, fase
+     3. (pura) Curva de Lissajous y box-counting
+    3b. (pura) Score: partitura de celdas + estadísticas (mean, std, entropy, k-means...)
+    3c. ScoreRenderer: grid de mini-Lissajous (presentación)
+     4. Audio: captura (tono, micrófono, archivo)
+     5. Render principal (trazo con persistencia + overlay)
+     6. Fractal preview (Julia / Mandelbrot)
+     7. UI: panel de control
+     8. Dimensión fractal en vivo
+     9. Exportación y puente WebSocket (TouchDesigner)
+    10. Bucle principal
+   ============================================================================ */
+
+/* @PURE_START */
+/* ─────────────────────────────  0. UTILIDADES  ───────────────────────────── */
+const PHI = (1 + Math.sqrt(5)) / 2;          // razón áurea 1.6180339887...
+const TAU = Math.PI * 2;
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const centsOf = r => 1200 * Math.log2(r);                    // razón -> cents
+const wrapPi = x => x - TAU * Math.floor((x + Math.PI) / TAU);   // ángulo a [-π, π)
+const smoothK = (dt, tau) => 1 - Math.exp(-dt / tau);           // coeficiente de suavizado temporal
+const hueLerp = (a, b, t) => (a + (((b - a + 540) % 360) - 180) * t + 360) % 360; // camino corto en el círculo
+
+/* ──────────────  1. ENTONACIÓN JUSTA: tabla y emparejamiento  ───────────────
+   Cada intervalo: [numerador, denominador, nombre, tipo].
+   Nota: 45:32 se incluye por indicación expresa aunque su numerador es > 16.
+   Sustituye/amplía esta tabla con la de tu repo "harmonic web".               */
+const RAW_INTERVALS = [
+  [1, 1,  'Unísono',                     'perfecto'],
+  [16, 15,'Segunda menor',               'disonante'],
+  [10, 9, 'Segunda mayor (tono menor)',  'disonante'],
+  [9, 8,  'Segunda mayor',               'disonante'],
+  [8, 7,  'Segunda septimal',            'septimal'],
+  [7, 6,  'Tercera menor septimal',      'septimal'],
+  [6, 5,  'Tercera menor',              'consonante'],
+  [5, 4,  'Tercera mayor',               'consonante'],
+  [4, 3,  'Cuarta justa',                'perfecto'],
+  [7, 5,  'Tritono septimal',            'septimal'],
+  [45, 32,'Tritono',                     'disonante'],
+  [10, 7, 'Tritono septimal mayor',      'septimal'],
+  [3, 2,  'Quinta justa',                'perfecto'],
+  [8, 5,  'Sexta menor',                 'consonante'],
+  [5, 3,  'Sexta mayor',                 'consonante'],
+  [7, 4,  'Séptima armónica',            'septimal'],
+  [16, 9, 'Séptima menor (pitagórica)',  'disonante'],
+  [9, 5,  'Séptima menor',               'disonante'],
+  [15, 8, 'Séptima mayor',               'disonante'],
+  [2, 1,  'Octava',                      'perfecto'],
+];
+/* Color por intervalo: el tono (hue) crece con el tamaño en cents, evitando la
+   zona dorada que se reserva a φ. */
+const INTERVALS = RAW_INTERVALS.map(([n, d, name, kind]) => {
+  const ratio = n / d, cents = centsOf(ratio);
+  return { n, d, name, kind, ratio, cents, label: n + ':' + d,
+           hue: (150 + 230 * cents / 1200) % 360, phi: false };
+});
+const UNISON = INTERVALS.find(i => i.n === 1 && i.d === 1);
+const OCTAVE = INTERVALS.find(i => i.n === 2 && i.d === 1);
+/* Caso especial: razón áurea, color dorado propio */
+const PHI_INTERVAL = { n: PHI, d: 1, name: 'Razón áurea φ', kind: 'áureo',
+  ratio: PHI, cents: centsOf(PHI), label: 'φ:1', hue: 47, phi: true };
+
+/* Pliega una razón a [1, 2) y cuenta las octavas quitadas */
+function foldOctaves(r) {
+  let oct = 0;
+  while (r >= 2) { r /= 2; oct++; }
+  while (r < 1)  { r *= 2; oct--; }
+  return { r, oct };
+}
+
+/* Dado un par de frecuencias, devuelve el intervalo justo más cercano.
+   - err: desviación en cents (positivo = más agudo que el ideal)
+   - valid: |err| < 50 cents
+   - φ gana si cae dentro de phiTol cents y está más cerca que el mejor justo */
+function matchInterval(fA, fB, phiTol) {
+  const lo = Math.min(fA, fB), hi = Math.max(fA, fB);
+  const raw = hi / lo;
+  const { r, oct } = foldOctaves(raw);
+  const cents = centsOf(r);
+  let best = INTERVALS[0], bestErr = cents - best.cents;
+  for (const it of INTERVALS) {
+    const e = cents - it.cents;
+    if (Math.abs(e) < Math.abs(bestErr)) { best = it; bestErr = e; }
+  }
+  let extraOct = oct;
+  if (best === UNISON && oct > 0) { best = OCTAVE; extraOct = oct - 1; } // 2^k exacto = octava
+  const phiErr = cents - PHI_INTERVAL.cents;
+  const phiHit = Math.abs(phiErr) <= phiTol && Math.abs(phiErr) <= Math.abs(bestErr);
+  const interval = phiHit ? PHI_INTERVAL : best;
+  const err = phiHit ? phiErr : bestErr;
+  return { lo, hi, raw, folded: r, oct: extraOct, cents, interval, err,
+           valid: Math.abs(err) < 50, phiErr, phiHit, phiNear: Math.abs(phiErr) <= phiTol };
+}
+function describeInterval(m) {
+  return m.interval.name + (m.oct > 0 ? ' (+' + m.oct + ' oct)' : '');
+}
+
+/* ─────────────────────────  2. ANÁLISIS ESPECTRAL  ─────────────────────────
+   spec: Float32Array en dB (getFloatFrequencyData). Devuelve los N picos más
+   prominentes con frecuencia refinada por interpolación parabólica.        */
+function detectPeaks(spec, sr, fftSize, o) {
+  const nb = spec.length;
+  const kMin = Math.max(3, Math.ceil(o.fMin * fftSize / sr));
+  const kMax = Math.min(nb - 4, Math.floor(o.fMax * fftSize / sr));
+  let maxDb = -Infinity;
+  for (let k = kMin; k <= kMax; k++) if (spec[k] > maxDb) maxDb = spec[k];
+  if (!(maxDb > o.floorDb)) return { peaks: [], maxDb };
+  const limit = maxDb + o.thresholdDb;               // umbral relativo al pico máximo
+  let cand = [];
+  for (let k = kMin; k <= kMax; k++) {
+    const v = spec[k];
+    if (v < limit) continue;
+    if (v > spec[k - 1] && v >= spec[k + 1] && v > spec[k - 2] && v >= spec[k + 2]) {
+      const a = spec[k - 1], c = spec[k + 1], den = a - 2 * v + c;
+      const delta = clamp(den !== 0 ? 0.5 * (a - c) / den : 0, -0.5, 0.5); // vértice de la parábola
+      const db = v - 0.25 * (a - c) * delta;
+      cand.push({ freq: (k + delta) * sr / fftSize, db, bin: k });
+    }
+  }
+  if (o.filterHarmonics) {                           // quedarse con "fundamentales"
+    cand.sort((p, q) => p.freq - q.freq);
+    const fund = [];
+    for (const p of cand) {
+      const isH = fund.some(q => {
+        const h = Math.round(p.freq / q.freq);
+        return h >= 2 && h <= 8 && Math.abs(centsOf(p.freq / (q.freq * h))) < 35;
+      });
+      if (!isH) fund.push(p);
+    }
+    cand = fund;
+  }
+  cand.sort((p, q) => q.db - p.db);
+  const out = [];
+  for (const p of cand) {                            // separación mínima entre picos
+    if (out.every(q => Math.abs(centsOf(p.freq / q.freq)) > 40)) out.push(p);
+    if (out.length >= o.maxPeaks) break;
+  }
+  const span = -o.thresholdDb || 1;
+  for (const p of out) p.rel = clamp((p.db - limit) / span, 0, 1);   // 0..1 dentro de la ventana
+  return { peaks: out, maxDb };
+}
+
+function rmsOf(x) {
+  let s = 0;
+  for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+  return Math.sqrt(s / Math.max(1, x.length));
+}
+
+/* DFT de una sola frecuencia con ventana de Hann (rotación recursiva, barata).
+   Devuelve la fase ψ de x ≈ cos(2π f n/sr + ψ). */
+const _hann = {};
+function dftAt(x, off, N, sr, f) {
+  if (!_hann[N]) {
+    const h = new Float32Array(N);
+    for (let n = 0; n < N; n++) h[n] = 0.5 - 0.5 * Math.cos(TAU * n / (N - 1));
+    _hann[N] = h;
+  }
+  const h = _hann[N], w = TAU * f / sr, cw = Math.cos(w), sw = Math.sin(w);
+  let c = 1, s = 0, re = 0, im = 0;
+  for (let n = 0; n < N; n++) {
+    const v = x[off + n] * h[n];
+    re += v * c; im -= v * s;
+    const nc = c * cw - s * sw; s = c * sw + s * cw; c = nc;
+  }
+  return { phase: Math.atan2(im, re), mag: Math.hypot(re, im) };
+}
+
+/* ───────────────────  3. LISSAJOUS Y BOX-COUNTING (puros)  ───────────────────
+   x(t) = Ax sin(a·zoom·t + δ),  y(t) = Ay sin(b·zoom·t + φ)                  */
+function lissajousPoint(t, L) {
+  return [L.Ax * Math.sin(L.a * L.zoom * t + L.delta),
+          L.Ay * Math.sin(L.b * L.zoom * t + L.phi)];
+}
+/* Periodo de cierre: con a,b enteros coprimos la curva cierra en 2π/zoom.
+   Con φ (irracional) no cierra: se muestrea un tramo largo (12 vueltas). */
+function lissajousPeriod(L) { return (L.irrational ? 12 : 1) * TAU / L.zoom; }
+/* Muestrea la curva; si normalize, amplitudes escaladas a máx = 1 */
+function sampleCurve(L, n, normalize) {
+  const T = lissajousPeriod(L), m = Math.max(L.Ax, L.Ay) || 1;
+  const K = normalize ? { ...L, Ax: L.Ax / m, Ay: L.Ay / m } : L;
+  const out = new Float32Array(2 * (n + 1));
+  for (let i = 0; i <= n; i++) {
+    const p = lissajousPoint(T * i / n, K);
+    out[2 * i] = p[0]; out[2 * i + 1] = p[1];
+  }
+  return out;
+}
+function curveSamples(L) {                           // nº de puntos razonable según complejidad
+  return clamp(Math.ceil(Math.max(L.a, L.b) * (L.irrational ? 12 : 1) * 24), 256, 8000);
+}
+
+/* Box-counting: occ es una rejilla size×size de 0/1. Para cada ε cuenta las
+   cajas ocupadas N(ε) y estima D como pendiente de log N vs log(1/ε). */
+function boxCountDimension(occ, size, eps) {
+  const pts = [];
+  for (const e of eps) {
+    let cnt = 0;
+    for (let by = 0; by < size; by += e) {
+      for (let bx = 0; bx < size; bx += e) {
+        let hit = false;
+        for (let y = by; y < by + e && !hit; y++) {
+          const row = y * size;
+          for (let x = bx; x < bx + e; x++) if (occ[row + x]) { hit = true; break; }
+        }
+        if (hit) cnt++;
+      }
+    }
+    pts.push({ eps: e, n: cnt, x: Math.log(1 / e), y: Math.log(Math.max(1, cnt)) });
+  }
+  const m = pts.length;
+  const mx = pts.reduce((s, p) => s + p.x, 0) / m, my = pts.reduce((s, p) => s + p.y, 0) / m;
+  let sxx = 0, sxy = 0, syy = 0;
+  for (const p of pts) { sxx += (p.x - mx) ** 2; sxy += (p.x - mx) * (p.y - my); syy += (p.y - my) ** 2; }
+  const D = sxx ? sxy / sxx : 0, b0 = my - D * mx;
+  const R2 = syy ? (sxy * sxy) / (sxx * syy) : 1;
+  return { D, R2, b0, pts };
+}
+
+/* c complejo derivado del ratio.
+   literal: c = (a/b) + i·(δ/π)    (fórmula de la especificación)
+   vista  : se desplaza a la región interesante del plano para que el
+            Julia/Mandelbrot no sea polvo: re ∈ [-1, -0.4], im ∈ ±0.35. */
+function cFromRatio(a, b, delta, literal) {
+  const r = a / b;
+  if (literal) return { re: r, im: delta / Math.PI };
+  const rr = clamp(r, 1, 2);
+  return { re: -0.4 - 0.6 * (rr - 1), im: 0.35 * delta / Math.PI };
+}
+
+/* ─────────────────────  3b. PARTITURA (SCORE) · módulo puro  ─────────────────────
+   Convierte el flujo continuo de ventanas analizadas en una lista de "celdas"
+   (una mini-Lissajous por ventana) y calcula estadísticas sobre esa lista.
+   No toca el DOM ni el reloj: se puede probar en Node. La parte visual está
+   en ScoreRenderer (más abajo, fuera del bloque puro).                        */
+
+/* Helpers estadísticos (puros) */
+const mean = a => { if (!a.length) return 0; let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; return s / a.length; };
+const std = a => {                                     // desviación estándar poblacional
+  if (!a.length) return 0;
+  const m = mean(a); let s = 0;
+  for (let i = 0; i < a.length; i++) s += (a[i] - m) * (a[i] - m);
+  return Math.sqrt(s / a.length);
+};
+const dist2 = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) { const d = a[i] - b[i]; s += d * d; } return s; };
+const roundTo = (x, d) => (x === null || x === undefined || !isFinite(x)) ? null : +x.toFixed(d);
+/* δ es periódica con periodo π (δ = dφ/2 y dφ vive en (-π, π]): diferencia por el camino corto */
+const wrapDelta = x => x - Math.PI * Math.round(x / Math.PI);
+
+/* Entropía de Shannon (en bits) de un vector de conteos */
+function entropy(counts) {
+  let tot = 0;
+  for (const c of counts) tot += c;
+  if (tot <= 0) return 0;
+  let h = 0;
+  for (const c of counts) if (c > 0) { const p = c / tot; h -= p * Math.log2(p); }
+  return h;
+}
+/* Histograma de nb cajas iguales entre min y max de arr (todo en la caja 0 si min = max) */
+function bucketize(arr, nb) {
+  const out = new Array(nb).fill(0);
+  if (!arr.length) return out;
+  let lo = Infinity, hi = -Infinity;
+  for (const v of arr) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  const span = hi - lo;
+  for (const v of arr) out[span > 0 ? Math.min(nb - 1, Math.floor((v - lo) / span * nb)) : 0]++;
+  return out;
+}
+/* Autocorrelación normalizada por la varianza: r[0] = 1, lags 0..maxLag.
+   Serie constante (varianza 0): se devuelve [1, 0, 0, ...]. */
+function autocorr(x, maxLag) {
+  const N = x.length, m = mean(x), out = new Array(maxLag + 1).fill(0);
+  let den = 0;
+  for (let i = 0; i < N; i++) den += (x[i] - m) * (x[i] - m);
+  if (N === 0 || den <= 1e-12) { out[0] = 1; return out; }
+  for (let k = 0; k <= maxLag; k++) {
+    let s = 0;
+    for (let i = 0; i + k < N; i++) s += (x[i] - m) * (x[i + k] - m);
+    out[k] = s / den;
+  }
+  return out;
+}
+/* k-means determinista: centroides iniciales equiespaciados en el tiempo.
+   Las etiquetas se reordenan por (a, b) del centroide para que el régimen 0 sea
+   siempre el de menor a: así no "bailan" de un análisis al siguiente. */
+function kmeans(X, k, iters) {
+  const N = X.length;
+  k = Math.min(k, N);
+  if (k < 1) return [];
+  const C = [];
+  for (let j = 0; j < k; j++) C.push(X[Math.floor(j * N / k)].slice());
+  const lab = new Array(N).fill(0);
+  for (let it = 0; it < iters; it++) {
+    let moved = false;
+    for (let i = 0; i < N; i++) {                      // asignar al centroide más cercano
+      let best = 0, bd = Infinity;
+      for (let j = 0; j < k; j++) { const d = dist2(X[i], C[j]); if (d < bd) { bd = d; best = j; } }
+      if (lab[i] !== best) { lab[i] = best; moved = true; }
+    }
+    const S = C.map(c => new Array(c.length).fill(0)), cnt = new Array(k).fill(0);
+    for (let i = 0; i < N; i++) { cnt[lab[i]]++; for (let d = 0; d < S[0].length; d++) S[lab[i]][d] += X[i][d]; }
+    for (let j = 0; j < k; j++) if (cnt[j]) C[j] = S[j].map(v => v / cnt[j]);   // clúster vacío: conserva su centroide
+    if (!moved && it > 0) break;                       // convergido: más iteraciones no cambian nada
+  }
+  const order = C.map((c, j) => j).sort((u, v) => C[u][0] - C[v][0] || C[u][1] - C[v][1] || u - v);
+  const rank = new Array(k);
+  order.forEach((j, r) => { rank[j] = r; });
+  return lab.map(l => rank[l]);
+}
+
+class Score {
+  /* tau: duración nominal (s) de la ventana que representa cada celda (metadato).
+     hop: separación mínima (s) entre celdas: es lo que fija el ritmo de llenado.
+     cols: columnas del grid al dibujar. phiTol: tolerancia φ (cents), metadato. */
+  constructor({ tau = 1.0, hop = 0.25, maxCells = 4096, cols = 24, phiTol = 10 } = {}) {
+    this.tau = tau; this.hop = hop; this.maxCells = maxCells; this.cols = cols; this.phiTol = phiTol;
+    this.cells = [];
+    this.lastT = -Infinity;
+    this.stats = { processed: 0, rejected: 0 };
+    this._dRev = 0;                                    // sube cada vez que computeD asigna una D
+    this._cache = null; this._cacheKey = '';           // memoria de analyze()
+  }
+
+  shouldProcess(t) { return t - this.lastT >= this.hop; }
+
+  /* Se llama en cada fotograma; solo actúa una vez por hop. Devuelve la celda
+     añadida o null. El reloj del hop avanza también en los rechazos, así
+     stats.rejected cuenta ventanas (no fotogramas). */
+  tick(t, A, Lz) {
+    if (!this.shouldProcess(t)) return null;
+    this.lastT = t;
+    const m = A && A.match;
+    if (!m || !m.valid) { this.stats.rejected++; return null; }
+    const n = Math.min(256, curveSamples(Lz));
+    const cell = {
+      t,
+      p: { a: Lz.a, b: Lz.b, delta: Lz.delta, phi: Lz.phi, Ax: Lz.Ax, Ay: Lz.Ay,
+           E: A.energy, rawRatio: m.raw, folded: m.folded, cents: m.cents,
+           err: m.err, oct: m.oct, phiHit: m.phiHit },
+      n,
+      curve: sampleCurve(Lz, n, true),                 // normalizada a [-1,1], Float32Array de 2*(n+1)
+      interval: Lz.interval.label,
+      hue: Lz.interval.hue,
+      D: null,
+    };
+    this.cells.push(cell);
+    while (this.cells.length > this.maxCells) this.cells.shift();   // buffer circular
+    this.stats.processed++;
+    return cell;
+  }
+
+  /* Aplica boxCountFn(cell, eps) a las últimas 8 celdas que aún no tienen D
+     (las más recientes primero). Devuelve cuántas intentó. */
+  computeD(boxCountFn, eps) {
+    let tried = 0;
+    for (let i = this.cells.length - 1; i >= 0 && tried < 8; i--) {
+      const c = this.cells[i];
+      if (c.D !== null || !c.curve) continue;
+      tried++;
+      const d = boxCountFn(c, eps);
+      if (Number.isFinite(d)) { c.D = d; this._dRev++; }
+    }
+    return tried;
+  }
+
+  /* Estadísticas de toda la partitura. Se memoriza por (N, última celda,
+     versión de D, τ, hop): llamarla en cada fotograma desde el WebSocket
+     no repite el cálculo mientras nada cambie. Tratar el resultado como solo lectura. */
+  analyze() {
+    const cells = this.cells, N = cells.length;
+    if (!N) return null;
+    const key = [N, cells[N - 1].t, this.stats.processed, this._dRev, this.tau, this.hop].join('|');
+    if (this._cache && this._cacheKey === key) return this._cache;
+
+    // vocabulario de razones a:b (clave con 2 decimales) y su entropía
+    const counts = new Map();
+    for (const c of cells) {
+      const k = c.p.a.toFixed(2) + ':' + c.p.b.toFixed(2);
+      counts.set(k, (counts.get(k) || 0) + 1);
+    }
+    const all = [...counts.entries()].sort((x, y) => y[1] - x[1] || (x[0] < y[0] ? -1 : 1));
+    const vocab = all.slice(0, 16);
+    const H_ab = entropy(all.map(e => e[1]));          // sobre TODO el vocabulario, no solo el top-16
+
+    // dimensión fractal de las celdas que ya la tienen
+    const Ds = [];
+    for (const c of cells) if (c.D !== null && c.D !== undefined) Ds.push(c.D);
+    const D_stat = Ds.length ? { mean: mean(Ds), std: std(Ds), min: Math.min(...Ds), max: Math.max(...Ds) } : null;
+
+    // velocidad de cambio entre celdas consecutivas: hypot(Δa, Δb, Δδ/π, ΔAx, ΔAy)
+    const speeds = [];
+    for (let i = 1; i < N; i++) {
+      const p = cells[i].p, q = cells[i - 1].p;
+      speeds.push(Math.hypot(p.a - q.a, p.b - q.b, wrapDelta(p.delta - q.delta) / Math.PI, p.Ax - q.Ax, p.Ay - q.Ay));
+    }
+    const E_speed = entropy(bucketize(speeds, 12));
+
+    // autocorrelación de la serie δ
+    const ac_delta = autocorr(cells.map(c => c.p.delta), Math.min(64, N >> 2));
+
+    // transiciones: saltos de velocidad por encima de media + 2σ
+    const thr = mean(speeds) + 2 * std(speeds), transitions = [];
+    for (let i = 0; i < speeds.length; i++) {
+      if (speeds[i] > thr) transitions.push({ t: cells[i + 1].t, idx: i + 1, mag: speeds[i] });
+    }
+
+    // regímenes: k-means (k=4, 12 iteraciones) sobre [a, b, δ/π, D ?? 1.5]
+    const X = cells.map(c => [c.p.a, c.p.b, c.p.delta / Math.PI, c.D ?? 1.5]);
+    const labels = kmeans(X, 4, 12);
+    const regimes = labels.map((regime, i) => ({ t: cells[i].t, regime }));
+
+    let nPhi = 0;
+    for (const c of cells) if (c.p.phiHit === true) nPhi++;
+
+    this._cache = { N, tau: this.tau, hop: this.hop, vocab, vocab_size: all.length, H_ab, D_stat,
+                    E_speed, ac_delta, transitions, regimes, phi_fraction: nPhi / N };
+    this._cacheKey = key;
+    return this._cache;
+  }
+
+  /* Estructura serializable. Las curvas (257 pares como máximo por celda) solo
+     se incluyen si withCurves. */
+  toJSON(withCurves = false) {
+    const cells = this.cells.map(c => {
+      const p = c.p, o = {
+        t: roundTo(c.t, 3),
+        p: { a: roundTo(p.a, 5), b: roundTo(p.b, 5), delta: roundTo(p.delta, 5), phi: roundTo(p.phi, 5),
+             Ax: roundTo(p.Ax, 4), Ay: roundTo(p.Ay, 4), E: roundTo(p.E, 4), rawRatio: roundTo(p.rawRatio, 6),
+             folded: roundTo(p.folded, 6), cents: roundTo(p.cents, 3), err: roundTo(p.err, 3), oct: p.oct, phiHit: p.phiHit },
+        n: c.n, interval: c.interval, hue: roundTo(c.hue, 1), D: roundTo(c.D, 4),
+      };
+      if (withCurves && c.curve) o.curve = Array.from(c.curve, v => roundTo(v, 4));
+      return o;
+    });
+    return {
+      meta: { kind: 'lissajous-score', version: 1, exportedAt: new Date().toISOString(),
+              tau: this.tau, hop: this.hop, cols: this.cols, maxCells: this.maxCells, phiTol: this.phiTol,
+              N: cells.length, withCurves: !!withCurves },
+      stats: { ...this.stats },
+      analysis: this.analyze(),
+      cells,
+    };
+  }
+
+  /* Reconstruye una partitura desde toJSON(). Sin curvas las celdas se conservan
+     (para las estadísticas) pero no se dibujan ni se les puede calcular D. */
+  static fromJSON(obj) {
+    const m = (obj && obj.meta) || {};
+    const s = new Score({ tau: m.tau, hop: m.hop, maxCells: m.maxCells, cols: m.cols, phiTol: m.phiTol });
+    for (const c of ((obj && obj.cells) || [])) {
+      s.cells.push({ t: c.t, p: { ...c.p }, n: c.n || 0, curve: c.curve ? Float32Array.from(c.curve) : null,
+                     interval: c.interval, hue: c.hue, D: c.D === null || c.D === undefined ? null : c.D });
+    }
+    while (s.cells.length > s.maxCells) s.cells.shift();
+    if (obj && obj.stats) s.stats = { processed: obj.stats.processed | 0, rejected: obj.stats.rejected | 0 };
+    return s;
+  }
+}
+/* @PURE_END */
+
+/* ───────────────  3c. SCORERENDERER · presentación (Canvas 2D)  ───────────────
+   Dibuja la partitura como un grid de `cols` columnas, de izquierda a derecha y
+   de arriba abajo (la celda más antigua arriba a la izquierda). cellSize es el
+   tamaño máximo; si el panel es estrecho las celdas se reducen para que quepan
+   `cols` columnas sin scroll horizontal. Solo se redibuja lo que cambió (celdas
+   nuevas o que acaban de recibir D); un cambio de tamaño, de columnas o de
+   buffer provoca un redibujado completo.                                          */
+class ScoreRenderer {
+  constructor(canvas, { cellSize = 32, pad = 2 } = {}) {
+    this.cv = canvas; this.c = canvas.getContext('2d');
+    this.cellSize = cellSize; this.pad = pad;
+    this._key = ''; this._st = [];                     // _st[i] = { cell, hasD } de lo ya dibujado
+    const host = canvas.parentElement;
+    if (host) host.style.scrollbarGutter = 'stable';   // la barra de scroll no cambia el ancho útil
+  }
+
+  render(score, opt = {}) {
+    const cv = this.cv, host = cv.parentElement;
+    if (!host || !host.clientWidth) return;            // panel oculto (modo proyección): nada que hacer
+    const hs = getComputedStyle(host);
+    const avail = host.clientWidth - parseFloat(hs.paddingLeft) - parseFloat(hs.paddingRight);
+    const cols = Math.max(1, score.cols | 0), pad = this.pad;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cs = Math.max(2, Math.min(this.cellSize, Math.floor((avail - pad) / cols) - pad));
+    const cells = score.cells, N = cells.length, rows = Math.max(1, Math.ceil(N / cols));
+    const cssW = cols * (cs + pad) + pad, cssH = rows * (cs + pad) + pad;
+    const lw = opt.lineWidth || 1;
+    const key = [cssW, cssH, dpr, cols, cs, lw].join('|');
+
+    let full = false;
+    if (key !== this._key) {                           // canvas.width/height solo cuando cambian
+      const atBottom = host.scrollTop + host.clientHeight >= host.scrollHeight - 4;
+      cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+      cv.style.width = cssW + 'px'; cv.style.height = cssH + 'px';
+      this._key = key; full = true;
+      if (atBottom) host.scrollTop = host.scrollHeight; // si estabas al final, sigue el borde de escritura
+    }
+    const c = this.c, st = this._st;
+    c.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // buffer vaciado o desplazado (se perdió la primera celda): todo de nuevo
+    if (!full && (N < st.length || (st.length && st[0].cell !== cells[0]))) full = true;
+    if (full) { c.fillStyle = '#06140f'; c.fillRect(0, 0, cssW, cssH); st.length = 0; }
+
+    const o = { lineWidth: lw };
+    for (let i = 0; i < N; i++) {
+      const cell = cells[i], hasD = cell.D !== null && cell.D !== undefined;
+      if (st[i] && st[i].hasD === hasD) continue;      // ya dibujada tal cual
+      const x0 = pad + (i % cols) * (cs + pad), y0 = pad + Math.floor(i / cols) * (cs + pad);
+      this._drawCell(c, cell, x0, y0, cs, o);
+      st[i] = { cell, hasD };
+    }
+  }
+
+  /* Una celda: fondo negro + curva normalizada en [-1,1]² con el hue de su
+     intervalo. Si ya tiene D, un halo ancho y tenue la hace "más gruesa":
+     la dimensión fractal se lee como grosor del trazo. */
+  _drawCell(c, cell, x0, y0, cs, opt = {}) {
+    c.fillStyle = '#000'; c.fillRect(x0, y0, cs, cs);
+    if (!cell || !cell.curve || !cell.n) return;
+    const cur = cell.curve, n = cell.n, h = cs / 2, r = h - 1, cx = x0 + h, cy = y0 + h;
+    const hue = ((cell.hue % 360) + 360) % 360;
+    c.save();
+    c.beginPath(); c.rect(x0, y0, cs, cs); c.clip();   // el halo no invade las celdas vecinas
+    c.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const x = cx + r * cur[2 * i], y = cy - r * cur[2 * i + 1];
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.lineJoin = 'round';
+    if (cell.D !== null && cell.D !== undefined) {
+      c.strokeStyle = 'hsla(' + hue + ',90%,60%,0.15)';
+      c.lineWidth = Math.max(1, (cell.D - 1) * 8 * (cs / this.cellSize));   // (D-1)·8 px a tamaño nominal; escala con la celda
+      c.stroke();
+    }
+    c.strokeStyle = 'hsla(' + hue + ',90%,60%,0.85)';
+    c.lineWidth = opt.lineWidth || 1;
+    c.stroke();
+    c.restore();
+  }
+}
+
+/* ───────────────────────────  0b. ESTADO GLOBAL  ──────────────────────────── */
+const $ = id => document.getElementById(id);
+const css = (hue, l = 60, a = 1, s = 100) => `hsla(${((hue % 360) + 360) % 360},${s}%,${l}%,${a})`;
+const FFT_SIZES = [1024, 2048, 4096, 8192, 16384];
+
+/* Parámetros controlados desde el panel */
+const P = {
+  fftIdx: 2, nPeaks: 4, thresholdDb: -40, zoom: 1, persistence: 0.985,
+  phiTol: 10, rmsSens: 1, speed: 8,
+  grid: true, axes: true, info: true, phiLock: false, ghost: true,
+  filterHarm: false, mute: false,
+};
+
+/* Estado vivo de la curva (lo que se dibuja ahora mismo) */
+const Lz = {
+  a: 3, b: 2, aT: 3, bT: 2, zoom: 1, delta: 0, phi: Math.PI / 2,
+  Ax: 0.8, Ay: 0.8, t: 0, irrational: false,
+  interval: INTERVALS.find(i => i.n === 3 && i.d === 2),
+  hue: 0, light: 60, speed: 8, phSin: 0, phCos: 1, ampSm: 0.5, energySm: 0.4, lastMatch: null,
+};
+Lz.hue = Lz.interval.hue;
+const FD = { D: 0, R2: 0, pts: [], b0: 0 };         // última dimensión fractal
+let fps = 60;
+
+/* Partitura (módulo Score): el renderer se crea al final del script */
+const SCORE = new Score({ tau: 1.0, hop: 0.25, cols: 24, maxCells: 4096 });
+let scoreRnd = null;
+let lastDAnalysis = 0;
+let lastScoreRender = 0;
+
+/* ───────────────────────────────  4. AUDIO  ───────────────────────────────── */
+const Au = {
+  ctx: null, an: null, monitor: null, kind: null, nodes: [], stream: null,
+  el: null, elSrc: null, url: null, spec: null, time: null, started: false,
+  tone: { f1: 440, f2: 660, o1: null, o2: null },
+};
+
+function setStatus(msg, cls) {
+  const s = $('status'); s.textContent = msg; s.className = cls || '';
+}
+function auRunning() {
+  return !!(Au.ctx && Au.ctx.state === 'running' && Au.kind && Au.kind !== 'micrófono (esperando permiso)');
+}
+function auApplyFft() {                                // fftSize configurable
+  if (!Au.an) return;
+  Au.an.fftSize = FFT_SIZES[P.fftIdx];
+  Au.spec = new Float32Array(Au.an.frequencyBinCount);
+  Au.time = new Float32Array(Au.an.fftSize);
+}
+function auEnsure() {
+  if (Au.ctx) return Au.ctx;
+  const C = window.AudioContext || window.webkitAudioContext;
+  if (!C) throw new Error('Este navegador no soporta la Web Audio API');
+  Au.ctx = new C({ latencyHint: 'interactive' });
+  Au.an = Au.ctx.createAnalyser();
+  Au.an.smoothingTimeConstant = 0.55;
+  Au.an.minDecibels = -110; Au.an.maxDecibels = -10;
+  Au.monitor = Au.ctx.createGain();                    // salida a altavoces (con mute)
+  Au.monitor.gain.value = P.mute ? 0 : 1;
+  Au.monitor.connect(Au.ctx.destination);
+  auApplyFft();
+  return Au.ctx;
+}
+function auStop() {                                    // detiene la fuente actual
+  try { Au.tone.o1 && Au.tone.o1.stop(); } catch (e) {}
+  try { Au.tone.o2 && Au.tone.o2.stop(); } catch (e) {}
+  Au.tone.o1 = Au.tone.o2 = null;
+  Au.nodes.forEach(n => { try { n.disconnect(); } catch (e) {} });
+  Au.nodes = [];
+  if (Au.stream) { Au.stream.getTracks().forEach(t => t.stop()); Au.stream = null; }
+  if (Au.el) Au.el.pause();
+  Au.kind = null;
+  $('btnPlay').disabled = true;
+}
+async function auTone() {                              // tono de prueba 440 + 660 Hz (3:2)
+  try {
+    auEnsure(); auStop();
+    const c = Au.ctx, p = c.resume();
+    const mix = c.createGain(), mon = c.createGain();
+    mon.gain.value = 0.3;                              // volumen audible moderado
+    const mk = f => { const o = c.createOscillator(), g = c.createGain();
+      o.type = 'sine'; o.frequency.value = f; g.gain.value = 0.25; o.connect(g); g.connect(mix); return [o, g]; };
+    const [o1, g1] = mk(Au.tone.f1), [o2, g2] = mk(Au.tone.f2);
+    mix.connect(Au.an); mix.connect(mon); mon.connect(Au.monitor);
+    o1.start(); o2.start();
+    Au.tone.o1 = o1; Au.tone.o2 = o2; Au.nodes = [o1, o2, g1, g2, mix, mon];
+    Au.kind = 'tono de prueba';
+    await p;
+    setStatus('Tono de prueba activo · ' + Au.tone.f1 + ' + ' + Au.tone.f2 + ' Hz', 'ok');
+  } catch (e) { setStatus('No se pudo iniciar el audio: ' + e.message, 'err'); }
+}
+async function auMic() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setStatus('El micrófono no está disponible aquí (requiere HTTPS, localhost o file:// en un navegador compatible).', 'err');
+    return;
+  }
+  try {
+    auEnsure(); auStop();
+    Au.kind = 'micrófono (esperando permiso)';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    await Au.ctx.resume();
+    const src = Au.ctx.createMediaStreamSource(stream);
+    src.connect(Au.an);                                // sin monitor: evita realimentación
+    Au.stream = stream; Au.nodes = [src]; Au.kind = 'micrófono';
+    setStatus('Micrófono activo', 'ok');
+  } catch (e) {
+    Au.kind = null;
+    const msg = { NotAllowedError: 'Permiso de micrófono denegado. Autorízalo en el navegador e inténtalo de nuevo.',
+      NotFoundError: 'No se encontró ningún micrófono.', NotReadableError: 'El micrófono está en uso por otra aplicación.' }[e.name]
+      || ('Error de micrófono: ' + (e.message || e.name));
+    setStatus(msg, 'err');
+  }
+}
+function auFile(file) {
+  if (!file) return;
+  if (file.type && !/^(audio|video)\//.test(file.type)) { setStatus('Formato no soportado: ' + file.type, 'err'); return; }
+  try {
+    auEnsure();
+    if (!Au.el) {
+      Au.el = new Audio(); Au.el.loop = true;
+      Au.elSrc = Au.ctx.createMediaElementSource(Au.el);     // solo se puede crear una vez
+      Au.el.addEventListener('error', () => { setStatus('No se pudo decodificar el archivo (formato no soportado o dañado).', 'err'); $('btnPlay').disabled = true; });
+      Au.el.addEventListener('play',  () => $('btnPlay').textContent = '⏸ Pause');
+      Au.el.addEventListener('pause', () => $('btnPlay').textContent = '▶ Play');
+    }
+    auStop();
+    if (Au.url) URL.revokeObjectURL(Au.url);
+    Au.url = URL.createObjectURL(file);
+    Au.el.src = Au.url;
+    Au.elSrc.connect(Au.an); Au.elSrc.connect(Au.monitor);
+    Au.nodes = [Au.elSrc]; Au.kind = 'archivo';
+    $('btnPlay').disabled = false;
+    Au.ctx.resume();
+    Au.el.play().then(() => setStatus('Reproduciendo: ' + file.name, 'ok'))
+      .catch(e => setStatus('No se pudo reproducir: ' + e.message, 'err'));
+  } catch (e) { setStatus('Error al cargar el archivo: ' + e.message, 'err'); }
+}
+
+/* ────────────────────────  ANÁLISIS POR FOTOGRAMA  ────────────────────────
+   Devuelve { peaks, rms, energy, match, matches, phase, source }.
+   Si el AudioContext aún no corre (sin gesto del usuario) se simula el tono
+   de prueba para que la curva se vea funcionando desde el primer instante.  */
+function analyze(time) {
+  const A = { peaks: [], rms: 0, energy: 0, match: null, matches: [], phase: null, source: 'demo virtual' };
+  let sr = 48000, fftSize = FFT_SIZES[P.fftIdx];
+  if (auRunning()) {
+    A.source = Au.kind;
+    sr = Au.ctx.sampleRate; fftSize = Au.an.fftSize;
+    Au.an.getFloatFrequencyData(Au.spec);
+    Au.an.getFloatTimeDomainData(Au.time);
+    const sp = Au.spec;
+    for (let i = 0; i < sp.length; i++) if (!(sp[i] > -140)) sp[i] = -140;   // -Infinity -> -140
+    A.rms = rmsOf(Au.time);
+    const k0 = Math.max(1, Math.floor(50 * fftSize / sr)), k1 = Math.min(sp.length - 1, Math.floor(8000 * fftSize / sr));
+    let e = 0;
+    for (let k = k0; k <= k1; k++) e += clamp((sp[k] + 100) / 70, 0, 1);
+    A.energy = e / Math.max(1, k1 - k0 + 1);
+    A.peaks = detectPeaks(sp, sr, fftSize, { maxPeaks: P.nPeaks, thresholdDb: P.thresholdDb,
+      fMin: 40, fMax: 8000, floorDb: -95, filterHarmonics: P.filterHarm }).peaks;
+  } else {
+    A.rms = 0.25; A.energy = 0.45 + 0.08 * Math.sin(time * 1.3);
+    A.peaks = [{ freq: Au.tone.f1, db: -20, rel: 1 }, { freq: Au.tone.f2, db: -20, rel: 1 }];
+  }
+  // pares de picos -> intervalos
+  const pk = A.peaks;
+  for (let i = 0; i < pk.length; i++) for (let j = i + 1; j < pk.length; j++) {
+    const m = matchInterval(pk[i].freq, pk[j].freq, P.phiTol);
+    m.i = i; m.j = j; A.matches.push(m);
+  }
+  if (pk.length >= 2) A.match = A.matches.find(m => m.i === 0 && m.j === 1);
+  // fase relativa entre los dos picos dominantes (invariante a desplazamientos temporales)
+  if (A.match && auRunning()) {
+    const N = Math.min(8192, Au.time.length), off = Au.time.length - N, m = A.match;
+    const lo = dftAt(Au.time, off, N, sr, m.lo), hi = dftAt(Au.time, off, N, sr, m.hi);
+    // f_hi/f_lo = (n/d)·2^oct  ->  invariante temporal: d·ψ_hi − n·2^oct·ψ_lo
+    const num = m.interval.n * Math.pow(2, m.oct), den = m.interval.phi ? 1 : m.interval.d;
+    if (lo.mag > 0 && hi.mag > 0) A.phase = wrapPi(den * hi.phase - num * lo.phase);
+  }
+  return A;
+}
+
+/* ───────────────  ACTUALIZACIÓN DE LA CURVA (audio-reactividad)  ─────────────── */
+function updateLissajous(A, dt, time) {
+  const L = Lz, m = A.match;
+  // 1) ratio objetivo
+  if (P.phiLock) { L.aT = PHI; L.bT = 1; L.interval = PHI_INTERVAL; }
+  else if (m && m.valid) { L.aT = m.interval.n; L.bT = m.interval.d; L.interval = m.interval; L.lastMatch = m; }
+  const k = smoothK(dt, 0.12);
+  L.a = Math.abs(L.a - L.aT) < 1e-3 ? L.aT : lerp(L.a, L.aT, k);
+  L.b = Math.abs(L.b - L.bT) < 1e-3 ? L.bT : lerp(L.b, L.bT, k);
+  L.irrational = L.interval.phi;
+  L.zoom = P.zoom;
+  // 2) amplitud: RMS (con ataque rápido y relajación lenta) y magnitud relativa de cada pico
+  const target = clamp(0.2 + P.rmsSens * A.rms * 3, 0.12, 0.97);
+  L.ampSm = lerp(L.ampSm, target, smoothK(dt, target > L.ampSm ? 0.04 : 0.25));
+  const m1 = A.peaks[0] ? A.peaks[0].rel : 0.5, m2 = A.peaks[1] ? A.peaks[1].rel : 0.5;
+  L.Ax = clamp(L.ampSm * (0.75 + 0.25 * m1), 0.05, 0.97);
+  L.Ay = clamp(L.ampSm * (0.75 + 0.25 * m2), 0.05, 0.97);
+  // 3) fase: diferencia entre picos si es calculable; si no, LFO lento
+  let dphi;
+  if (A.phase !== null) {
+    const kk = smoothK(dt, 0.15);                      // suavizado circular (seno/coseno)
+    L.phSin = lerp(L.phSin, Math.sin(A.phase), kk); L.phCos = lerp(L.phCos, Math.cos(A.phase), kk);
+    dphi = Math.atan2(L.phSin, L.phCos);
+  } else dphi = TAU * 0.03 * time;
+  L.delta = 0.5 * dphi;
+  L.phi = Math.PI / 2 - 0.5 * dphi;
+  // 4) velocidad de trazado modulada por la energía en banda
+  L.energySm = lerp(L.energySm, A.energy, smoothK(dt, 0.2));
+  L.speed = P.speed * (0.5 + 1.5 * L.energySm);
+  // 5) color: tono del intervalo, dorado para φ
+  L.hue = hueLerp(L.hue, L.interval.hue, smoothK(dt, 0.2));
+  L.light = lerp(L.light, L.interval.phi ? 64 : 58, smoothK(dt, 0.2));
+}
+
+/* ──────────────────────  5. RENDER PRINCIPAL Y OVERLAY  ───────────────────── */
+const MAIN = { cv: $('cvMain'), w: 0, h: 0 }, OV = { cv: $('ov'), w: 0, h: 0 };
+MAIN.ctx = MAIN.cv.getContext('2d', { alpha: false });
+OV.ctx = OV.cv.getContext('2d');
+let DPR = 1;
+const HEAD = { x: 0, y: 0 };
+function resize() {
+  const st = $('stage').getBoundingClientRect();
+  DPR = Math.min(window.devicePixelRatio || 1, 2);     // 4K: hasta 2× sin disparar el coste
+  const w = Math.max(2, Math.round(st.width * DPR)), h = Math.max(2, Math.round(st.height * DPR));
+  for (const o of [MAIN, OV]) { o.w = w; o.h = h; o.cv.width = w; o.cv.height = h; }
+  MAIN.ctx.fillStyle = '#000'; MAIN.ctx.fillRect(0, 0, w, h);
+}
+new ResizeObserver(resize).observe($('stage'));
+window.addEventListener('resize', resize);
+const scaleR = () => Math.min(MAIN.w, MAIN.h) * 0.46;  // semi-ancho de la escena en píxeles
+
+/* Trazo continuo con persistencia: se avanza t, se dibuja el tramo nuevo y el
+   resto se desvanece con un rectángulo negro semitransparente (fósforo). */
+function drawTrace(dt) {
+  const c = MAIN.ctx, W = MAIN.w, H = MAIN.h, R = scaleR(), cx = W / 2, cy = H / 2;
+  const fade = 1 - Math.pow(P.persistence, dt * 60);
+  c.globalCompositeOperation = 'source-over';
+  c.fillStyle = 'rgba(0,0,0,' + fade.toFixed(4) + ')';
+  c.fillRect(0, 0, W, H);
+
+  const t0 = Lz.t, t1 = t0 + Lz.speed * dt;
+  Lz.t = t1 % (TAU * 10000);
+  const span = t1 - t0, maxAB = Math.max(Lz.a, Lz.b) * Lz.zoom;
+  const steps = clamp(Math.ceil(maxAB * span / 0.05), 2, 3000);
+  c.beginPath();
+  let x = 0, y = 0;
+  for (let i = 0; i <= steps; i++) {
+    const p = lissajousPoint(t0 + span * i / steps, Lz);
+    x = cx + R * p[0]; y = cy - R * p[1];
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  }
+  c.lineJoin = 'round'; c.lineCap = 'round';
+  c.globalCompositeOperation = 'lighter';
+  c.strokeStyle = css(Lz.hue, Lz.light, 0.22); c.lineWidth = 7 * DPR; c.stroke();      // halo
+  c.strokeStyle = css(Lz.hue, Lz.light + 10, 0.95); c.lineWidth = 1.7 * DPR; c.stroke(); // núcleo
+  c.globalCompositeOperation = 'source-over';
+  HEAD.x = x; HEAD.y = y;                              // la cabeza se dibuja en el overlay (no deja puntos)
+}
+
+function drawOverlay(A) {
+  const c = OV.ctx, W = OV.w, H = OV.h, R = scaleR(), cx = W / 2, cy = H / 2, d = DPR;
+  c.clearRect(0, 0, W, H);
+  if (P.grid) {
+    c.strokeStyle = 'rgba(57,255,156,0.07)'; c.lineWidth = d; c.beginPath();
+    for (let i = -4; i <= 4; i++) {
+      c.moveTo(cx + R * i / 4, cy - R); c.lineTo(cx + R * i / 4, cy + R);
+      c.moveTo(cx - R, cy + R * i / 4); c.lineTo(cx + R, cy + R * i / 4);
+    }
+    c.stroke(); c.strokeRect(cx - R, cy - R, 2 * R, 2 * R);
+  }
+  if (P.axes) {
+    c.strokeStyle = 'rgba(57,255,156,0.30)'; c.lineWidth = d; c.beginPath();
+    c.moveTo(cx - R, cy); c.lineTo(cx + R, cy); c.moveTo(cx, cy - R); c.lineTo(cx, cy + R);
+    for (let i = -20; i <= 20; i++) {                   // marcas de escala
+      const tl = (i % 5 === 0 ? 6 : 3) * d;
+      c.moveTo(cx + R * i / 20, cy - tl); c.lineTo(cx + R * i / 20, cy + tl);
+      c.moveTo(cx - tl, cy + R * i / 20); c.lineTo(cx + tl, cy + R * i / 20);
+    }
+    c.stroke();
+  }
+  if (P.ghost) {                                        // curva completa tenue
+    const n = curveSamples(Lz), S = sampleCurve(Lz, n, false);
+    c.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const x = cx + R * S[2 * i], y = cy - R * S[2 * i + 1];
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.strokeStyle = css(Lz.hue, Lz.light, 0.16); c.lineWidth = d; c.stroke();
+  }
+  c.fillStyle = Lz.interval.phi ? '#fff6cf' : '#ffffff';   // cabeza del trazo
+  c.beginPath(); c.arc(HEAD.x, HEAD.y, 3 * d, 0, TAU); c.fill();
+  if (P.info) {
+    const m = A.match, iv = Lz.interval, fs = 13 * d, pad = 16 * d;
+    c.textBaseline = 'top';
+    c.font = '700 ' + fs * 2 + 'px ui-monospace,Menlo,Consolas,monospace';
+    c.fillStyle = css(iv.hue, 62); c.fillText(iv.label, pad, pad);
+    c.font = fs + 'px ui-monospace,Menlo,Consolas,monospace';
+    c.fillStyle = 'rgba(169,245,210,0.85)';
+    let y = pad + fs * 2.6;
+    const line = s => { c.fillText(s, pad, y); y += fs * 1.4; };
+    line(P.phiLock ? 'φ-lock activo' : (m ? describeInterval(m) : iv.name));
+    if (m) line((m.err >= 0 ? '+' : '') + m.err.toFixed(1) + ' cents' + (m.valid ? '' : '  (sin intervalo claro)'));
+    line('a:b = ' + Lz.a.toFixed(3) + ' : ' + Lz.b.toFixed(3));
+    A.peaks.slice(0, 4).forEach(p => line(p.freq.toFixed(1) + ' Hz'));
+    c.textAlign = 'right'; c.fillStyle = 'rgba(255,210,63,0.9)';
+    c.fillText('D ≈ ' + FD.D.toFixed(3), W - pad, pad); c.textAlign = 'left';
+  }
+}
+
+/* ──────────────────────────  6. FRACTAL PREVIEW  ──────────────────────────
+   Julia 128x128 (≤50 iteraciones) con c derivado de los ratios, o Mandelbrot
+   con un marcador en c. Es la semilla de la Fase 2.                        */
+const PV = { cv: $('cvJulia'), N: 128, MAXIT: 50, last: 0, key: '' };
+PV.ctx = PV.cv.getContext('2d');
+PV.img = PV.ctx.createImageData(PV.N, PV.N);
+PV.buf = new Uint32Array(PV.img.data.buffer);
+function hslToRgb(h, s, l) {
+  h = (h % 360 + 360) % 360 / 360;
+  const a = s * Math.min(l, 1 - l), f = n => { const k = (n + h * 12) % 12; return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); };
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+}
+function buildPalette(hue) {                           // iteración -> color ABGR
+  const pal = new Uint32Array(PV.MAXIT + 1);
+  for (let i = 0; i < PV.MAXIT; i++) {
+    const v = Math.sqrt(i / PV.MAXIT), [r, g, b] = hslToRgb(hue, 1, 0.07 + 0.62 * v);
+    pal[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+  }
+  pal[PV.MAXIT] = 0xFF000000;                          // dentro del conjunto = negro
+  return pal;
+}
+function renderPreview(mode, c, hue) {
+  const N = PV.N, pal = buildPalette(hue), buf = PV.buf, M = PV.MAXIT;
+  if (mode === 'julia') {
+    const span = 3.2;                                  // vista [-1.6, 1.6]²
+    for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
+      let zr = (px / N - 0.5) * span, zi = (0.5 - py / N) * span, it = 0;
+      while (it < M && zr * zr + zi * zi <= 4) { const t = zr * zr - zi * zi + c.re; zi = 2 * zr * zi + c.im; zr = t; it++; }
+      buf[py * N + px] = pal[it];
+    }
+    PV.ctx.putImageData(PV.img, 0, 0);
+  } else {
+    const x0 = -2.2, x1 = 0.8, y0 = -1.5, y1 = 1.5;     // vista del Mandelbrot
+    for (let py = 0; py < N; py++) for (let px = 0; px < N; px++) {
+      const cr = x0 + (x1 - x0) * px / N, ci = y1 - (y1 - y0) * py / N;
+      let zr = 0, zi = 0, it = 0;
+      while (it < M && zr * zr + zi * zi <= 4) { const t = zr * zr - zi * zi + cr; zi = 2 * zr * zi + ci; zr = t; it++; }
+      buf[py * N + px] = pal[it];
+    }
+    PV.ctx.putImageData(PV.img, 0, 0);
+    const mx = clamp((c.re - x0) / (x1 - x0), 0, 1) * N, my = clamp((y1 - c.im) / (y1 - y0), 0, 1) * N;
+    PV.ctx.strokeStyle = '#ffd23f'; PV.ctx.lineWidth = 1;
+    PV.ctx.beginPath(); PV.ctx.arc(mx, my, 4, 0, TAU); PV.ctx.moveTo(mx - 8, my); PV.ctx.lineTo(mx + 8, my);
+    PV.ctx.moveTo(mx, my - 8); PV.ctx.lineTo(mx, my + 8); PV.ctx.stroke();
+  }
+}
+/* STUB FASE 2: Mandelbrot completo.
+   Aquí iría un fragment shader WebGL (o un Worker) con zoom/pan, hasta
+   1000+ iteraciones y coloreado suave. Entrada sugerida: c = cFromRatio(...),
+   centro = c, zoom = 2^(D-1) (la dimensión fractal D controla la profundidad).
+   En TouchDesigner: GLSL TOP con uniforms (cRe, cIm, D) alimentados por el JSON. */
+function renderMandelbrotFullStub() { /* pendiente Fase 2 */ }
+
+function maybePreview(now) {
+  if (now - PV.last < 150) return;
+  const mode = $('selPrev').value, lit = $('chkLit').checked;
+  const c = cFromRatio(Lz.a, Lz.b, Lz.delta, lit);
+  const key = mode + lit + c.re.toFixed(3) + c.im.toFixed(3) + Math.round(Lz.hue / 3);
+  if (key === PV.key) return;
+  PV.key = key; PV.last = now;
+  renderPreview(mode, c, Lz.hue);
+  const cs = cFromRatio(Lz.a, Lz.b, Lz.delta, true), cv = cFromRatio(Lz.a, Lz.b, Lz.delta, false);
+  $('o_c').textContent = 'c literal = ' + cs.re.toFixed(3) + (cs.im < 0 ? ' − ' : ' + ') + Math.abs(cs.im).toFixed(3) + 'i  ·  c vista = ' +
+    cv.re.toFixed(3) + (cv.im < 0 ? ' − ' : ' + ') + Math.abs(cv.im).toFixed(3) + 'i';
+}
+
+/* ──────────────  8. DIMENSIÓN FRACTAL EN VIVO (cada ~500 ms)  ──────────────
+   Se dibuja la curva en un canvas offscreen 256×256 (blanco sobre negro),
+   amplitudes normalizadas para medir la forma y no el volumen.              */
+const FR = { cv: document.createElement('canvas'), last: 0, size: 256, eps: [2, 4, 8, 16, 32, 64, 128] };
+FR.cv.width = FR.cv.height = FR.size;
+FR.ctx = FR.cv.getContext('2d', { willReadFrequently: true });
+FR.occ = new Uint8Array(FR.size * FR.size);
+function computeFractal() {
+  const c = FR.ctx, S = FR.size, R = S * 0.47;
+  c.fillStyle = '#000'; c.fillRect(0, 0, S, S);
+  const n = curveSamples(Lz), pts = sampleCurve(Lz, n, true);
+  c.beginPath();
+  for (let i = 0; i <= n; i++) {
+    const x = S / 2 + R * pts[2 * i], y = S / 2 - R * pts[2 * i + 1];
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  }
+  c.strokeStyle = '#fff'; c.lineWidth = 1; c.stroke();
+  const data = c.getImageData(0, 0, S, S).data, occ = FR.occ;
+  for (let i = 0; i < occ.length; i++) occ[i] = data[4 * i] > 40 ? 1 : 0;
+  const r = boxCountDimension(occ, S, FR.eps);
+  Object.assign(FD, r);
+  drawRegression();
+}
+function drawRegression() {
+  const cv = $('cvReg'), c = cv.getContext('2d'), W = cv.width, H = cv.height, m = 28;
+  c.clearRect(0, 0, W, H); c.fillStyle = '#010403'; c.fillRect(0, 0, W, H);
+  if (!FD.pts.length) return;
+  const xs = FD.pts.map(p => p.x), ys = FD.pts.map(p => p.y);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = 0, y1 = Math.max(...ys) * 1.05;
+  const X = x => m + (x - x0) / (x1 - x0) * (W - 2 * m), Y = y => H - m - (y - y0) / (y1 - y0) * (H - 2 * m);
+  c.strokeStyle = '#10382d'; c.lineWidth = 1; c.strokeRect(m, m / 2, W - 1.5 * m, H - 1.5 * m);
+  c.strokeStyle = '#ffd23f'; c.beginPath();            // recta de regresión
+  c.moveTo(X(x0), Y(FD.b0 + FD.D * x0)); c.lineTo(X(x1), Y(FD.b0 + FD.D * x1)); c.stroke();
+  c.fillStyle = '#39ff9c'; c.font = '11px monospace';
+  for (const p of FD.pts) { c.beginPath(); c.arc(X(p.x), Y(p.y), 3.2, 0, TAU); c.fill(); }
+  c.fillStyle = '#4f7f6c'; c.fillText('log N(ε)', 3, 12); c.fillText('log(1/ε)', W - 62, H - 6);
+  $('o_reg').textContent = 'D = ' + FD.D.toFixed(3) + '   R² = ' + FD.R2.toFixed(4) + '   N(ε) = [' + FD.pts.map(p => p.n).join(', ') + ']';
+}
+function maybeFractal(now) {
+  if (now - FR.last < 500) return;                     // ~2 Hz para no saturar la CPU
+  FR.last = now; computeFractal();
+}
+
+/* Dimensión fractal de UNA celda de la partitura. Reutiliza un único canvas
+   offscreen 256×256 (cell.curve ya viene normalizada a [-1,1]) y devuelve solo D. */
+const SC_BOX = { cv: document.createElement('canvas'), size: 256 };
+SC_BOX.cv.width = SC_BOX.cv.height = SC_BOX.size;
+SC_BOX.ctx = SC_BOX.cv.getContext('2d', { willReadFrequently: true });
+SC_BOX.occ = new Uint8Array(SC_BOX.size * SC_BOX.size);
+function boxCountCell(cell, eps) {
+  if (!cell || !cell.curve || !cell.n) return null;
+  const c = SC_BOX.ctx, S = SC_BOX.size, R = S * 0.47, cur = cell.curve;
+  c.fillStyle = '#000'; c.fillRect(0, 0, S, S);
+  c.beginPath();
+  for (let i = 0; i <= cell.n; i++) {
+    const x = S / 2 + R * cur[2 * i], y = S / 2 - R * cur[2 * i + 1];
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  }
+  c.strokeStyle = '#fff'; c.lineWidth = 1; c.stroke();
+  const data = c.getImageData(0, 0, S, S).data, occ = SC_BOX.occ;
+  for (let i = 0; i < occ.length; i++) occ[i] = data[4 * i] > 40 ? 1 : 0;
+  return boxCountDimension(occ, S, eps).D;
+}
+
+/* ───────────────────────────  7. UI: PANEL  ──────────────────────────────── */
+const SLIDERS = [
+  { k: 'fftIdx', label: 'fftSize', min: 0, max: 4, step: 1, fmt: v => FFT_SIZES[v], on: auApplyFft },
+  { k: 'nPeaks', label: 'Nº de picos', min: 2, max: 8, step: 1, fmt: v => v },
+  { k: 'thresholdDb', label: 'Umbral de picos', min: -80, max: -10, step: 1, fmt: v => v + ' dB' },
+  { k: 'zoom', label: 'Zoom armónico', min: 0.25, max: 8, step: 0.05, fmt: v => v.toFixed(2) + '×' },
+  { k: 'persistence', label: 'Persistencia', min: 0, max: 0.995, step: 0.005, fmt: v => v.toFixed(3) },
+  { k: 'phiTol', label: 'Tolerancia φ', min: 1, max: 50, step: 1, fmt: v => v + ' cents' },
+  { k: 'rmsSens', label: 'Sensibilidad RMS', min: 0.1, max: 6, step: 0.1, fmt: v => v.toFixed(1) + '×' },
+  { k: 'speed', label: 'Velocidad de trazo', min: 0.5, max: 30, step: 0.5, fmt: v => v.toFixed(1) + ' rad/s' },
+];
+const TOGGLES = [
+  { k: 'grid', label: 'Mostrar grid' }, { k: 'axes', label: 'Mostrar ejes' },
+  { k: 'info', label: 'Mostrar información de ratios' },
+  { k: 'ghost', label: 'Curva completa tenue (fantasma)' },
+  { k: 'phiLock', label: 'φ-lock (forzar ratio áureo)' },
+  { k: 'filterHarm', label: 'Filtrar armónicos (buscar fundamentales)' },
+  { k: 'mute', label: 'Silenciar salida de audio', on: v => { if (Au.monitor) Au.monitor.gain.value = v ? 0 : 1; } },
+];
+function buildControls() {
+  const sl = $('sliders'), tg = $('toggles');
+  for (const s of SLIDERS) {
+    const row = document.createElement('div'); row.className = 'sl';
+    row.innerHTML = '<span>' + s.label + '</span><input type="range" min="' + s.min + '" max="' + s.max +
+      '" step="' + s.step + '" value="' + P[s.k] + '"><output></output>';
+    const inp = row.children[1], out = row.children[2];
+    const upd = () => { P[s.k] = parseFloat(inp.value); out.textContent = s.fmt(P[s.k]); if (s.on) s.on(P[s.k]); };
+    inp.addEventListener('input', upd); out.textContent = s.fmt(P[s.k]); sl.appendChild(row);
+  }
+  for (const t of TOGGLES) {
+    const lab = document.createElement('label'); lab.className = 'tg';
+    lab.innerHTML = '<input type="checkbox"' + (P[t.k] ? ' checked' : '') + '><span>' + t.label + '</span>';
+    lab.firstChild.addEventListener('change', e => { P[t.k] = e.target.checked; if (t.on) t.on(P[t.k]); });
+    tg.appendChild(lab);
+  }
+}
+buildControls();
+
+const _txt = {};
+function setText(id, s) { if (_txt[id] !== s) { _txt[id] = s; $(id).textContent = s; } }
+let uiLast = 0;
+function refreshUI(now, A) {
+  if (now - uiLast < 110) return;
+  uiLast = now;
+  const iv = Lz.interval, m = A.match;
+  const big = $('o_big'); big.style.color = css(iv.hue, 62);
+  setText('o_big', iv.label + '  ' + iv.name);
+  setText('o_fps', fps.toFixed(0));
+  setText('o_src', A.source + (auRunning() ? '' : ' (sin audio)'));
+  setText('o_rms', A.rms.toFixed(4) + '  (' + (20 * Math.log10(A.rms + 1e-9)).toFixed(1) + ' dB)');
+  setText('o_kind', iv.kind);
+  setText('o_ratio', m ? m.raw.toFixed(4) + ' → ' + m.folded.toFixed(4) : '–');
+  setText('o_cents', m ? (m.err >= 0 ? '+' : '') + m.err.toFixed(1) + ' cents' + (m.valid ? '' : ' ⚠') : '–');
+  setText('o_phi', m ? (m.phiNear ? 'SÍ' : 'no') + '  (' + (m.phiErr >= 0 ? '+' : '') + m.phiErr.toFixed(1) + ' c)' : (P.phiLock ? 'φ-lock' : '–'));
+  setText('o_ab', Lz.a.toFixed(3) + ' : ' + Lz.b.toFixed(3) + '  ×' + Lz.zoom.toFixed(2));
+  setText('o_ph', Lz.delta.toFixed(3) + ' / ' + Lz.phi.toFixed(3) + (A.phase === null ? '  (LFO)' : ''));
+  setText('o_amp', Lz.Ax.toFixed(3) + ' / ' + Lz.Ay.toFixed(3));
+  setText('o_D', FD.D ? FD.D.toFixed(3) : '–');
+  const ph = A.peaks.map((p, i) => '<div>#' + (i + 1) + '  ' + p.freq.toFixed(2) + ' Hz  ' + p.db.toFixed(1) + ' dB</div>').join('');
+  const pr = A.matches.map(x => '<div style="color:' + css(x.interval.hue, 62) + '">#' + (x.i + 1) + '↔#' + (x.j + 1) + '  ' + x.interval.label +
+    '  ' + (x.err >= 0 ? '+' : '') + x.err.toFixed(1) + 'c' + (x.phiHit ? '  ★φ' : '') + '</div>').join('');
+  if (_txt.peaks !== ph) { _txt.peaks = ph; $('o_peaks').innerHTML = ph || '<div style="color:var(--dim)">sin picos sobre el umbral</div>'; }
+  if (_txt.pairs !== pr) { _txt.pairs = pr; $('o_pairs').innerHTML = pr; }
+  // resumen de la partitura (analyze() está memorizada: no recalcula si nada cambió)
+  const an = SCORE.analyze();
+  let sc = '—';
+  if (an) {
+    const f = (v, d = 2) => v.toFixed(d), Ds = an.D_stat;
+    sc = 'N=' + an.N + '  τ=' + an.tau + 's  hop=' + an.hop + 's  ·  vocabulario=' + an.vocab_size +
+      '  ·  H_ab=' + f(an.H_ab) + ' bits  ·  φ=' + Math.round(an.phi_fraction * 100) + '%\n' +
+      'D: ' + (Ds ? 'μ=' + f(Ds.mean, 3) + ' σ=' + f(Ds.std, 3) + ' [' + f(Ds.min, 3) + '…' + f(Ds.max, 3) + ']' : '—') +
+      '  ·  E_speed=' + f(an.E_speed) + '  ·  transiciones=' + an.transitions.length;
+  }
+  setText('o_score', sc);
+}
+
+/* ──────────────────  9. EXPORTACIÓN Y PUENTE WEBSOCKET  ────────────────────── */
+function download(name, blob) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+let lastA = null;
+
+/* Estructura común para JSON exportado y para el WebSocket */
+function buildPayload(A, withCurve) {
+  const cs = cFromRatio(Lz.a, Lz.b, Lz.delta, true), cv = cFromRatio(Lz.a, Lz.b, Lz.delta, false);
+  const m = A.match;
+  const o = {
+    timestamp: new Date().toISOString(),
+    source: A.source, sampleRate: Au.ctx ? Au.ctx.sampleRate : null, fftSize: FFT_SIZES[P.fftIdx],
+    rms: +A.rms.toFixed(5), energy: +A.energy.toFixed(4),
+    peaks: A.peaks.map(p => ({ freq: +p.freq.toFixed(3), db: +p.db.toFixed(2), rel: +(p.rel || 0).toFixed(3) })),
+    ratio: m ? { raw: m.raw, folded: m.folded, octaves: m.oct, cents: +m.cents.toFixed(2), errCents: +m.err.toFixed(2), valid: m.valid,
+                 phiNear: m.phiNear, phiErrCents: +m.phiErr.toFixed(2) } : null,
+    interval: { label: Lz.interval.label, name: Lz.interval.name, kind: Lz.interval.kind,
+                n: Lz.interval.n, d: Lz.interval.d, phi: Lz.interval.phi, hue: +Lz.hue.toFixed(1) },
+    phiLock: P.phiLock,
+    lissajous: { a: +Lz.a.toFixed(5), b: +Lz.b.toFixed(5), zoom: Lz.zoom, delta: +Lz.delta.toFixed(5), phi: +Lz.phi.toFixed(5),
+                 Ax: +Lz.Ax.toFixed(4), Ay: +Lz.Ay.toFixed(4), speed: +Lz.speed.toFixed(3), t: +Lz.t.toFixed(3) },
+    fractal: { D: +FD.D.toFixed(4), R2: +FD.R2.toFixed(4), counts: FD.pts.map(p => ({ eps: p.eps, N: p.n })),
+               c: cv, cLiteral: cs },
+    // partitura: va siempre (el WebSocket de TouchDesigner la consume); analyze() está memorizada
+    score: { tau: SCORE.tau, hop: SCORE.hop, cols: SCORE.cols, N: SCORE.cells.length,
+             stats: { ...SCORE.stats }, analysis: SCORE.analyze() },
+  };
+  if (withCurve) {
+    const S = sampleCurve(Lz, 512, false), pts = [];
+    for (let i = 0; i <= 512; i++) pts.push([+S[2 * i].toFixed(5), +S[2 * i + 1].toFixed(5)]);
+    o.curve = { points: pts, closed: !Lz.irrational, note: 'x,y en [-1,1]; 513 muestras sobre un periodo' };
+  }
+  return o;
+}
+$('btnJson').addEventListener('click', () => {
+  if (!lastA) return;
+  download('lissajous_' + stamp() + '.json', new Blob([JSON.stringify(buildPayload(lastA, true), null, 2)], { type: 'application/json' }));
+});
+$('btnPng').addEventListener('click', () => {
+  MAIN.cv.toBlob(b => b ? download('lissajous_' + stamp() + '.png', b) : setStatus('No se pudo generar el PNG', 'err'), 'image/png');
+});
+
+/* Stub de WebSocket hacia TouchDesigner (Web Server DAT, puerto 9980).
+   Se envía un JSON compacto por fotograma mientras haya conexión abierta. */
+const WS = { sock: null };
+function wsLabel(s, cls) { const e = $('o_ws'); e.textContent = 'WebSocket: ' + s; e.style.color = cls === 'ok' ? 'var(--neon)' : cls === 'err' ? 'var(--err)' : 'var(--dim)'; }
+function wsToggle() {
+  if (WS.sock) { WS.sock.close(); return; }
+  const url = $('wsUrl').value.trim();
+  try {
+    WS.sock = new WebSocket(url); wsLabel('conectando a ' + url + '…');
+    WS.sock.onopen = () => { wsLabel('conectado (' + url + ')', 'ok'); $('btnWs').textContent = 'Desconectar'; };
+    WS.sock.onerror = () => wsLabel('error de conexión (¿está el servidor activo?)', 'err');
+    WS.sock.onclose = () => { WS.sock = null; $('btnWs').textContent = 'Conectar'; wsLabel('desconectado'); };
+  } catch (e) { WS.sock = null; wsLabel('URL inválida: ' + e.message, 'err'); }
+}
+function wsSend(A) {
+  if (WS.sock && WS.sock.readyState === 1) {
+    try { WS.sock.send(JSON.stringify(buildPayload(A, false))); } catch (e) {}
+  }
+}
+$('btnWs').addEventListener('click', wsToggle);
+
+/* ───────────────────  11. PARTITURA · controles del panel  ───────────────────
+   Los <input> son la fuente de verdad. 'input' aplica al vuelo los valores
+   válidos; 'change' (al salir del campo) corrige, recorta y avisa.            */
+function bindScoreInput(id, key, min, max, label, integer) {
+  const el = $(id);
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    if (isFinite(v) && v >= min && v <= max && (!integer || v === Math.round(v))) SCORE[key] = v;
+  });
+  el.addEventListener('change', () => {
+    let v = parseFloat(el.value);
+    if (!isFinite(v)) { el.value = SCORE[key]; setStatus(label + ': valor no válido, se conserva ' + SCORE[key], 'err'); return; }
+    if (integer) v = Math.round(v);
+    const c = clamp(v, min, max);
+    if (c !== parseFloat(el.value)) setStatus(label + ' fuera de rango [' + min + ', ' + max + ']: ajustado a ' + c, 'err');
+    SCORE[key] = c; el.value = c;
+  });
+}
+bindScoreInput('scTau', 'tau', 0.1, 10, 'Ventana τ');
+bindScoreInput('scHop', 'hop', 0.05, 5, 'Hop');
+bindScoreInput('scCols', 'cols', 8, 64, 'Columnas', true);
+
+function resetScore() {                                // botón "Limpiar partitura" y tecla S
+  SCORE.cells.length = 0;
+  SCORE.stats = { processed: 0, rejected: 0 };
+  if (scoreRnd) scoreRnd.render(SCORE);
+  setStatus('Partitura reiniciada', 'ok');
+}
+$('btnScoreClear').addEventListener('click', resetScore);
+$('btnScoreJson').addEventListener('click', () => {
+  download('score_' + stamp() + '.json', new Blob([JSON.stringify(SCORE.toJSON(true), null, 2)], { type: 'application/json' }));
+});
+
+/* ─────────────────────────  MODO PROYECCIÓN Y EVENTOS  ───────────────────── */
+function setProjection(on) {
+  document.body.classList.toggle('projection', on);
+  const hint = $('hint');
+  if (on) {
+    if ($('stage').requestFullscreen) $('stage').requestFullscreen().catch(() => {});
+    hint.classList.add('show'); setTimeout(() => hint.classList.remove('show'), 3000);
+  } else if (document.fullscreenElement) document.exitFullscreen();
+  setTimeout(resize, 60);
+}
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && document.body.classList.contains('projection')) setProjection(false);
+});
+$('btnProj').addEventListener('click', () => setProjection(!document.body.classList.contains('projection')));
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'p' || e.key === 'P') setProjection(!document.body.classList.contains('projection'));
+  if (e.key === 'c' || e.key === 'C') clearTrace();
+  if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.metaKey && !e.altKey) resetScore();   // Ctrl+S sigue guardando la página
+  if (e.key === 'Escape' && document.body.classList.contains('projection')) setProjection(false);
+});
+function clearTrace() { MAIN.ctx.fillStyle = '#000'; MAIN.ctx.fillRect(0, 0, MAIN.w, MAIN.h); }
+$('btnClear').addEventListener('click', clearTrace);
+
+$('btnTone').addEventListener('click', () => { Au.started = true; auTone(); });
+$('btnMic').addEventListener('click', () => { Au.started = true; auMic(); });
+$('btnFile').addEventListener('click', () => { Au.started = true; $('fileIn').click(); });
+$('fileIn').addEventListener('change', e => { auFile(e.target.files[0]); e.target.value = ''; });
+$('btnPlay').addEventListener('click', () => {
+  if (!Au.el || Au.kind !== 'archivo') return;
+  if (Au.el.paused) { Au.ctx.resume(); Au.el.play().catch(e => setStatus('No se pudo reproducir: ' + e.message, 'err')); } else Au.el.pause();
+});
+function toneFreq(which, v) {
+  v = clamp(parseFloat(v) || 440, 20, 8000); Au.tone[which] = v;
+  const o = which === 'f1' ? Au.tone.o1 : Au.tone.o2;
+  if (o && Au.ctx) o.frequency.setTargetAtTime(v, Au.ctx.currentTime, 0.02);
+}
+$('toneF1').addEventListener('input', e => toneFreq('f1', e.target.value));
+$('toneF2').addEventListener('input', e => toneFreq('f2', e.target.value));
+/* Primer clic en cualquier parte: arranca el tono de prueba (política de autoplay) */
+document.addEventListener('click', () => { if (!Au.started) { Au.started = true; auTone(); } });
+
+/* ──────────────────────────  10. BUCLE PRINCIPAL  ────────────────────────── */
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = clamp((now - last) / 1000, 0.001, 0.1); last = now;
+  fps = lerp(fps, 1 / dt, 0.08);
+  const time = now / 1000;
+  const A = analyze(time); lastA = A;
+  updateLissajous(A, dt, time);
+  const cell = SCORE.tick(time, A, Lz);                // null salvo cuando toca añadir una celda (cada hop)
+  drawTrace(dt);
+  const proj = document.body.classList.contains('projection');
+  if (!proj) {
+    drawOverlay(A);
+    maybeFractal(now);
+    maybePreview(now);
+    refreshUI(now, A);
+  } else if (now - FR.last > 1000) { FR.last = now; computeFractal(); }   // proyección: D (para el WS) a 1 Hz
+  wsSend(A);
+  // partitura: solo con el panel visible (en proyección se sigue recolectando, sin dibujar ni medir D)
+  if (!proj) {
+    if (scoreRnd && now - lastScoreRender > 200) { scoreRnd.render(SCORE); lastScoreRender = now; }
+    if (now - lastDAnalysis > 500) {
+      SCORE.computeD(boxCountCell, [2, 4, 8, 16, 32, 64]);
+      lastDAnalysis = now;
+    }
+  }
+}
+resize();
+scoreRnd = new ScoreRenderer($('cvScore'), { cellSize: 32, pad: 2 });
+scoreRnd.render(SCORE);                                // estado vacío
+setProjection.bind(null);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

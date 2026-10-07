@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>STROMA · Laboratory</title>
+<meta name="description" content="Laboratorio experimental de geometría, sonido e información.">
+<style>
+:root{
+  --bg:#07090c;
+  --panel:rgba(12,16,21,.78);
+  --text:#e8edf2;
+  --muted:#7f8b96;
+  --line:#26313a;
+  --accent:#00e5ff;
+  --accent2:#e040fb;
+  --grid:rgba(0,229,255,.055);
+  --shadow:0 24px 70px rgba(0,0,0,.45);
+}
+body.day{
+  --bg:#eef2f3;
+  --panel:rgba(255,255,255,.82);
+  --text:#182027;
+  --muted:#68747c;
+  --line:#cbd4d8;
+  --accent:#007f91;
+  --accent2:#9b28a9;
+  --grid:rgba(0,80,100,.06);
+  --shadow:0 24px 70px rgba(30,50,60,.13);
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;font-family:"JetBrains Mono","SFMono-Regular",Consolas,monospace;background:var(--bg);color:var(--text)}
+body{
+  display:grid;place-items:center;overflow:hidden;
+  background-image:
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:42px 42px;
+  transition:background .35s,color .35s;
+}
+body:before{
+  content:"";position:fixed;inset:0;pointer-events:none;
+  background:radial-gradient(circle at 50% 45%,rgba(0,229,255,.07),transparent 38%);
+}
+main{width:min(920px,92vw);position:relative;padding:32px 0}
+header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:62px}
+.brand{display:flex;gap:14px;align-items:center}
+.mark{
+  width:38px;height:38px;border:1px solid var(--accent);position:relative;
+  box-shadow:0 0 24px rgba(0,229,255,.12);
+}
+.mark:before,.mark:after{content:"";position:absolute;inset:7px;border:1px solid var(--accent2);border-radius:50%}
+.mark:after{transform:rotate(60deg) scaleX(1.65)}
+.kicker{font-size:11px;letter-spacing:.24em;color:var(--accent);margin-bottom:7px}
+h1{font-size:clamp(25px,5vw,44px);font-weight:400;letter-spacing:-.05em;margin:0}
+.sub{color:var(--muted);font-size:11px;margin-top:7px}
+.toggle{
+  border:1px solid var(--line);background:var(--panel);color:var(--text);
+  padding:9px 12px;font:inherit;font-size:10px;cursor:pointer;letter-spacing:.08em;
+  transition:.2s;
+}
+.toggle:hover{border-color:var(--accent);color:var(--accent)}
+.hero{max-width:700px;margin-bottom:48px}
+.hero .eyebrow{font-size:10px;color:var(--muted);letter-spacing:.18em;margin-bottom:18px}
+.hero p{font-family:system-ui,sans-serif;font-size:17px;line-height:1.65;color:var(--muted);max-width:650px;margin:0}
+.hero p b{color:var(--text);font-weight:500}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px}
+.card{
+  position:relative;display:block;text-decoration:none;color:var(--text);
+  min-height:245px;padding:28px;border:1px solid var(--line);background:var(--panel);
+  box-shadow:var(--shadow);backdrop-filter:blur(12px);overflow:hidden;
+  transition:transform .25s,border-color .25s,box-shadow .25s;
+}
+.card:hover{transform:translateY(-5px);border-color:var(--accent);box-shadow:0 25px 80px rgba(0,229,255,.12)}
+.card:nth-child(2):hover{border-color:var(--accent2);box-shadow:0 25px 80px rgba(224,64,251,.12)}
+.card:after{
+  content:"";position:absolute;right:-70px;bottom:-100px;width:210px;height:210px;
+  border:1px solid var(--accent);border-radius:50%;opacity:.18;
+}
+.card:nth-child(2):after{border-color:var(--accent2)}
+.number{font-size:10px;color:var(--muted);letter-spacing:.15em}
+.card h2{font-size:23px;font-weight:400;margin:45px 0 12px;letter-spacing:-.04em}
+.card p{font-family:system-ui,sans-serif;color:var(--muted);font-size:14px;line-height:1.5;max-width:340px}
+.enter{position:absolute;right:25px;bottom:23px;color:var(--accent);font-size:10px;letter-spacing:.14em}
+.card:nth-child(2) .enter{color:var(--accent2)}
+footer{display:flex;justify-content:space-between;margin-top:55px;padding-top:17px;border-top:1px solid var(--line);color:var(--muted);font-size:9px;letter-spacing:.12em}
+.status{display:flex;align-items:center;gap:7px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px var(--accent)}
+@media(max-width:650px){
+  body{overflow:auto}
+  main{padding:25px 0}
+  header{margin-bottom:45px}
+  .grid{grid-template-columns:1fr}
+  .card{min-height:215px}
+  footer{gap:20px;flex-direction:column}
+}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">
+      <div class="mark" aria-hidden="true"></div>
+      <div>
+        <div class="kicker">EXPERIMENTAL LABORATORY</div>
+        <h1>STROMA</h1>
+        <div class="sub">sound · geometry · information</div>
+      </div>
+    </div>
+    <button class="toggle" id="theme" type="button" aria-label="Cambiar modo">☼ DAY MODE</button>
+  </header>
+
+  <section class="hero">
+    <div class="eyebrow">/ LABORATORY INTERFACE · 001</div>
+    <p>
+      Un espacio para explorar la relación entre <b>frecuencia, proporción,
+      fase y geometría</b>. Dos instrumentos, una misma pregunta:
+      ¿qué estructura aparece cuando la información se convierte en sonido?
+    </p>
+  </section>
+
+  <section class="grid" aria-label="Instrumentos">
+    <a class="card" href="Lissajous_Lab.html">
+      <div class="number">01 / ANALYSIS</div>
+      <h2>Lissajous Lab</h2>
+      <p>Analiza el sonido, recupera relaciones frecuenciales y observa cómo se transforman en geometría de Lissajous.</p>
+      <span class="enter">OPEN LAB →</span>
+    </a>
+
+    <a class="card" href="STROMA_Player.html">
+      <div class="number">02 / SYNTHESIS</div>
+      <h2>STROMA Player</h2>
+      <p>Interpreta una partitura JSON como secuencia temporal de estados sonoros y variaciones geométricas.</p>
+      <span class="enter">OPEN PLAYER →</span>
+    </a>
+  </section>
+
+  <footer>
+    <div class="status"><span class="dot"></span> SYSTEM READY</div>
+    <div>τ · hop · phase · ratio · D</div>
+    <div>STROMA / 2026</div>
+  </footer>
+</main>
+
+<script>
+const btn=document.getElementById("theme");
+const saved=localStorage.getItem("stroma-theme");
+if(saved==="day") document.body.classList.add("day");
+function update(){
+  btn.textContent=document.body.classList.contains("day")?"☾ NIGHT MODE":"☼ DAY MODE";
+}
+update();
+btn.addEventListener("click",()=>{
+  document.body.classList.toggle("day");
+  localStorage.setItem("stroma-theme",document.body.classList.contains("day")?"day":"night");
+  update();
+});
+</script>
+</body>
+</html>
